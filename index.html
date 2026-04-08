@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pin Inspection + Health Monitor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a1d;
+      color: #e4e4e7;
+      font-family: Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #1e1e22;
+      padding: 14px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #333;
+    }
+
+    h1 { font-size: 20px; }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: orange;
+      animation: pulse 1s infinite;
+    }
+
+    .dot.connected { background: #22c55e; animation: none; }
+    .dot.disconnected { background: #ef4444; animation: none; }
+
+    @keyframes pulse {
+      0%,100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 1100px;
+      background: #252529;
+      border: 1px solid #333;
+      border-radius: 10px;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .image-panel {
+      flex: 1;
+      background: #111;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 500px;
+      position: relative;
+    }
+
+    #pin-image {
+      max-width: 100%;
+      max-height: 520px;
+      object-fit: contain;
+      display: none;
+    }
+
+    #waiting-msg {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .info {
+      width: 350px;
+      border-left: 1px solid #333;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .result {
+      font-size: 42px;
+      font-weight: bold;
+      color: #888;
+    }
+
+    .result.pass { color: #22c55e; }
+    .result.fail { color: #ef4444; }
+
+    .bar-bg {
+      width: 100%;
+      height: 10px;
+      background: #333;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      width: 0%;
+      background: #22c55e;
+      transition: width 0.4s ease;
+    }
+
+    .feature-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 14px;
+      margin-bottom: 6px;
+    }
+
+    .meta {
+      font-size: 13px;
+      color: #aaa;
+      line-height: 1.6;
+    }
+
+    .health-box {
+      background: #1f2937;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      line-height: 1.7;
+      color: #e5e7eb;
+    }
+
+    @media(max-width: 768px) {
+      .card { flex-direction: column; }
+      .info {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid #333;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Pin Inspection + Health Monitor</h1>
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span id="status-text">Connecting...</span>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="image-panel">
+      <img id="pin-image" alt="Pin image" />
+      <p id="waiting-msg">Waiting for frames...</p>
+    </div>
+
+    <div class="info">
+      <div class="result" id="result">—</div>
+
+      <div>
+        <p style="font-size:13px;color:#aaa;margin-bottom:6px;">Score / Threshold</p>
+        <div class="bar-bg">
+          <div class="bar-fill" id="score-bar"></div>
+        </div>
+        <p id="score-text" style="margin-top:6px;font-size:13px;">—</p>
+      </div>
+
+      <div id="features">No features yet</div>
+
+      <div class="meta">
+        <div id="time">—</div>
+        <div id="device">—</div>
+      </div>
+
+      <div>
+        <p style="font-size:13px;color:#aaa;margin-bottom:6px;">Machine Health</p>
+        <div class="health-box" id="health-box">
+          Waiting for health data...
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+let client = null;
+
+function setStatus(state, text) {
+  const dot = document.getElementById("dot");
+  dot.className = "dot " + state;
+  document.getElementById("status-text").textContent = text;
+}
+
+function connectMQTT() {
+  setStatus("", "Connecting...");
+
+  const clientId = "web-" + Math.random().toString(16).slice(2, 8);
+  client = new Paho.MQTT.Client("socket.ddlc.ai", 9001, clientId);
+
+  client.onConnectionLost = function () {
+    setStatus("disconnected", "Disconnected, retrying...");
+    setTimeout(connectMQTT, 3000);
+  };
+
+  client.onMessageArrived = function (msg) {
+    let data;
+    try {
+      data = JSON.parse(msg.payloadString);
+    } catch {
+      return;
+    }
+
+    const topic = msg.destinationName;
+
+    // HEALTH TOPIC
+    if (topic.startsWith("health/")) {
+  const hw = data.hardware || {};
+  const mv = data.machine_vision || {};
+  const cpu = hw.cpu || {};
+  const memory = hw.memory || {};
+  const disk = hw.disk || {};
+
+  const uptime = hw.uptime_s || 0;
+  const days = Math.floor(uptime / 86400);
+  const hours = Math.floor((uptime % 86400) / 3600);
+  const mins = Math.floor((uptime % 3600) / 60);
+
+  const uptimeText =
+    (days ? days + "d " : "") +
+    (hours ? hours + "h " : "") +
+    (mins ? mins + "m" : "0m");
+
+  document.getElementById("health-box").innerHTML = `
+    <b>Machine:</b> ${data.machine_id || "—"}<br>
+    <b>Host:</b> ${hw.hostname || "—"}<br>
+    <b>Platform:</b> ${hw.platform || "—"}<br>
+    <b>Uptime:</b> ${uptimeText}<br>
+    <b>CPU:</b> ${cpu.percent || 0}% (${cpu.count || 0} cores)<br>
+    <b>Memory:</b> ${memory.percent || 0}%<br>
+    <b>Disk:</b> ${disk.percent || 0}%<br>
+    <b>Vision:</b> ${mv.rois_configured ? "OK (" + mv.roi_count + " ROIs)" : "No ROI"}<br>
+    <b>Updated:</b> ${data.local_time || "—"}
+  `;
+  return;
+}
+
+    // PIN INSPECTION
+    if (data.image) {
+      const img = document.getElementById("pin-image");
+      img.src = "data:image/jpeg;base64," + data.image;
+      img.style.display = "block";
+      document.getElementById("waiting-msg").style.display = "none";
+    }
+
+    const result = (data.result || "").toUpperCase();
+    const resultEl = document.getElementById("result");
+    resultEl.textContent = result || "—";
+    resultEl.className = "result " + (result === "PASS" ? "pass" : "fail");
+
+    const score = data.score || 0;
+    const threshold = data.threshold || 1;
+    const pct = threshold > 0 ? Math.min((score / threshold) * 100, 100) : 0;
+
+    document.getElementById("score-bar").style.width = pct + "%";
+    document.getElementById("score-text").textContent =
+      score.toFixed(3) + " / " + threshold.toFixed(3);
+
+    const features = data.features || {};
+    const keys = Object.keys(features);
+
+    document.getElementById("features").innerHTML = keys.length
+      ? keys.map(k =>
+          `<div class="feature-row"><span>${k}</span><span>${features[k].toFixed(3)}</span></div>`
+        ).join("")
+      : "No features";
+
+    document.getElementById("time").textContent =
+      "Time: " + (data.local_time || "—");
+
+    document.getElementById("device").textContent =
+      "Device: " + (data.device_id || "—");
+  };
+
+  client.connect({
+    onSuccess: function () {
+      setStatus("connected", "Connected");
+      client.subscribe("+/pin_inspection");
+      client.subscribe("health/+");
+    },
+    onFailure: function () {
+      setStatus("disconnected", "Failed, retrying...");
+      setTimeout(connectMQTT, 5000);
+    },
+    useSSL: false
+  });
+}
+
+connectMQTT();
+</script>
+
+</body>
+</html>
