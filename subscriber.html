@@ -310,7 +310,7 @@ function connectMQTT() {
       setStatus("disconnected", "Failed, retrying...");
       setTimeout(connectMQTT, 5000);
     },
-    useSSL: true
+    useSSL: false
   });
 }
 
